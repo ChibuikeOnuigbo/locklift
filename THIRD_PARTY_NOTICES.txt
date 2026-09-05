@@ -1,0 +1,5 @@
+LockLift bundles handle.exe from Microsoft Sysinternals.
+
+Sysinternals software is provided by Microsoft and is subject to the Sysinternals
+Software License Terms. Review the current terms before distributing a release:
+https://learn.microsoft.com/sysinternals/license-terms

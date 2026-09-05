@@ -1,0 +1,5 @@
+PyQt6>=6.6
+psutil>=5.9
+pywin32>=306
+pygame>=2.6
+pyinstaller>=6.10

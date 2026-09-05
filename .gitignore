@@ -1,0 +1,7 @@
+__pycache__/
+build/
+dist/
+release/
+*.log
+settings.json
+unlocker_debug.log
