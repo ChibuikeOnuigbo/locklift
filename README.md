@@ -25,10 +25,26 @@ On first start, LockLift asks to add this item to File Explorer:
 `Unlock with File Unlocker`.
 
 This works for files, folders, and drives. The choice is saved for your user.
+It adds `Unlock with File Unlocker` and `Force Delete`.
 
 ## Command line
 
-Free one path without the main window:
+Review lock owners and pick which apps to close:
+
+```powershell
+LockLift.exe --unlock "C:\Work\old.zip"
+```
+
+Ask how to delete a file or folder:
+
+```powershell
+LockLift.exe --force-delete "C:\Work\old.zip"
+```
+
+The app asks for Recycle Bin or Permanent Delete.
+It then shows the apps that use the path.
+
+Close all safe lock owners without a window:
 
 ```powershell
 LockLift.exe --silent "C:\Work\old.zip"
@@ -40,6 +56,20 @@ Add or remove the File Explorer item:
 LockLift.exe --register-explorer
 LockLift.exe --unregister-explorer
 ```
+
+## Delete after restart
+
+For a path that cannot be changed now, use the Force Actions tab.
+Pick Delete, then check Schedule operation for next reboot.
+LockLift uses Windows to run the delete after the next restart.
+
+To run LockLift at each boot, use Task Scheduler:
+
+1. Open Task Scheduler.
+2. Click Create Task.
+3. Set the trigger to At startup.
+4. Set the action to start `LockLift.exe`.
+5. Check Run with highest privileges.
 
 ## Build
 
