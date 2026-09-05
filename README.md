@@ -1,31 +1,56 @@
 # LockLift
 
-LockLift is a Windows file and folder unlocker that finds processes holding a path and releases them safely. It also supports monitoring, force actions, scheduled operations, and a File Explorer context-menu action.
+LockLift helps you free files and folders that are in use.
+It can find the app that holds a file, then stop that app.
 
-## Features
+## What it can do
 
-- Unlock files, folders, and drives from File Explorer.
-- Scan lock owners with Sysinternals Handle.
-- Skip protected Windows processes and system identities.
-- Monitor a path for new and released locks.
-- Force unlock, rename, move, delete, or schedule an operation for reboot.
-- Silent command-line mode for Explorer and automation.
-- Per-user Explorer integration, so setup does not require machine-wide registry changes.
+- Free files, folders, and drives from File Explorer.
+- Find apps that hold a file.
+- Skip key Windows apps.
+- Watch a file for new locks.
+- Stop locks before a move, copy, or delete.
+- Move, rename, or delete a locked path.
+- Run from a command line.
 
-## File Explorer integration
+## Use it
 
-On first launch, LockLift asks whether to add `Unlock with File Unlocker` to the context menu for files, folders, and drives. The choice is saved in `settings.json`. The integration can also be managed from a terminal:
+1. Start LockLift.
+2. Pick a file or folder.
+3. Click Scan.
+4. Pick a lock in the list.
+5. Click Unlock.
+
+On first start, LockLift asks to add this item to File Explorer:
+`Unlock with File Unlocker`.
+
+This works for files, folders, and drives. The choice is saved for your user.
+
+## Command line
+
+Free one path without the main window:
+
+```powershell
+LockLift.exe --silent "C:\Work\old.zip"
+```
+
+Add or remove the File Explorer item:
 
 ```powershell
 LockLift.exe --register-explorer
 LockLift.exe --unregister-explorer
-LockLift.exe --silent "C:\path\to\locked-file.ext"
 ```
-
-The integration uses the current user's registry hive and does not overwrite system-wide Explorer settings.
 
 ## Build
 
-Run `build_release.ps1` from this directory. The build bundles the application, `handle.exe`, the application icon, and the complete `assets` directory into `dist\LockLift.exe`, then creates `release\LockLift-windows.zip`.
+Run this from the project folder:
 
-The included Handle utility is from Microsoft Sysinternals and remains subject to its own license terms. Keep its accompanying license information with distributed releases as required.
+```powershell
+.\build_release.ps1
+```
+
+The build makes `dist\LockLift.exe` and
+`release\LockLift-windows.zip`.
+
+The app uses Handle from Microsoft Sysinternals.
+See `THIRD_PARTY_NOTICES.txt` for its license.
