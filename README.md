@@ -71,6 +71,14 @@ To run LockLift at each boot, use Task Scheduler:
 4. Set the action to start `LockLift.exe`.
 5. Check Run with highest privileges.
 
+## Download
+
+Get the latest Windows build from the
+[LockLift releases page](https://github.com/ChibuikeOnuigbo/locklift/releases).
+
+Use `LockLift.exe` for a quick start.
+Use the ZIP when you also want the license note.
+
 ## Build
 
 Run this from the project folder:
