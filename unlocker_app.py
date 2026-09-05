@@ -181,6 +181,24 @@ def create_fallback_pixmap(width=24, height=24, color=QColor(52, 152, 219)):
     return pixmap
 
 
+def set_action_cursors(root):
+    """Use a hand cursor on all key UI controls."""
+    control_types = (
+        QPushButton,
+        QLineEdit,
+        QComboBox,
+        QCheckBox,
+        QRadioButton,
+        QTableWidget,
+        QTabWidget,
+    )
+    for widget in root.findChildren(QWidget):
+        if isinstance(widget, control_types):
+            widget.setCursor(Qt.CursorShape.PointingHandCursor)
+    if isinstance(root, QTabWidget):
+        root.tabBar().setCursor(Qt.CursorShape.PointingHandCursor)
+
+
 def run_handle(query):
     exe_path = get_asset_path("handle.exe")
     if not os.path.exists(exe_path):
@@ -851,6 +869,8 @@ class UnlockerApp(QMainWindow):
         self.tabs.addTab(self.force_actions_tab, "Force Actions")
         self.tabs.addTab(self.monitor_tab, "Monitor")
         self.tabs.addTab(self.settings_tab, "Settings")
+
+        set_action_cursors(self)
 
         main_layout.addWidget(self.tabs, 1)
 
