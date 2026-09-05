@@ -4,15 +4,7 @@ import ctypes
 import win32file
 import winreg
 import psutil
-import traceback
-import win32api
-import win32con
-import win32file
-import win32process
-import win32security
 import time
-import math
-import random
 import json
 import shutil
 import csv
@@ -21,6 +13,7 @@ import re
 import subprocess
 from datetime import datetime
 import winsound
+from ctypes import wintypes
 
 from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, QTimer, QSize, QPropertyAnimation, QEasingCurve,
@@ -38,21 +31,20 @@ from PyQt6.QtWidgets import (
     QGraphicsDropShadowEffect, QGroupBox, QButtonGroup, QRadioButton,
     QGridLayout, QGraphicsBlurEffect, QScrollArea, QMessageBox
 )
-# Setup logging
+APP_DATA_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "LockLift")
+os.makedirs(APP_DATA_DIR, exist_ok=True)
+
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler("unlocker_debug.log"),
+        logging.FileHandler(os.path.join(APP_DATA_DIR, "unlocker_debug.log"), encoding="utf-8"),
         logging.StreamHandler(sys.stdout),
     ],
 )
 logger = logging.getLogger("UnlockerApp")
 
 
-# ==============================
-# UTILITY FUNCTIONS
-# ==============================
 def get_asset_path(filename):
     """Get absolute path to assets, works for dev and for PyInstaller"""
     base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
@@ -208,14 +200,13 @@ def run_handle(query):
         return ""
 
     try:
-        proc = subprocess.run(
-            [exe_path, "-a", "-u", query], capture_output=True, text=True
-        )
+        proc = subprocess.run([exe_path, "-a", "-u", query], capture_output=True, text=True)
         return proc.stdout + proc.stderr
 
 
     except Exception as e:
-        return f"[❌] handle failed: {e}"
+        logger.error("Handle failed: %s", e)
+        return ""
 
 
 def get_application_command():
@@ -240,29 +231,39 @@ def _delete_registry_tree(root, path):
 
 
 def set_explorer_integration(enabled):
-    """Install or remove a per-user Explorer context action."""
+    """Install or remove per-user Explorer actions."""
     paths = [
         r"Software\Classes\*\shell\FileUnlocker",
         r"Software\Classes\Directory\shell\FileUnlocker",
         r"Software\Classes\Drive\shell\FileUnlocker",
+        r"Software\Classes\*\shell\LockLiftForceDelete",
+        r"Software\Classes\Directory\shell\LockLiftForceDelete",
+        r"Software\Classes\Drive\shell\LockLiftForceDelete",
     ]
     if not enabled:
         for path in paths:
             _delete_registry_tree(winreg.HKEY_CURRENT_USER, path)
         return
 
-    command = f'{get_application_command()} --silent "%1"'
+    unlock_command = f'{get_application_command()} --unlock "%1"'
+    delete_command = f'{get_application_command()} --force-delete "%1"'
     executable_dir = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else __file__)
     icon_path = os.path.join(executable_dir, "unlocker.ico")
     if not os.path.exists(icon_path):
         icon_path = get_asset_path("unlock.png")
 
-    for path in paths:
+    for path in paths[:3]:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, path) as key:
             winreg.SetValueEx(key, "MUIVerb", 0, winreg.REG_SZ, "Unlock with File Unlocker")
             winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, icon_path)
             with winreg.CreateKey(key, "command") as command_key:
-                winreg.SetValueEx(command_key, "", 0, winreg.REG_SZ, command)
+                winreg.SetValueEx(command_key, "", 0, winreg.REG_SZ, unlock_command)
+    for path in paths[3:]:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, path) as key:
+            winreg.SetValueEx(key, "MUIVerb", 0, winreg.REG_SZ, "Force Delete")
+            winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, icon_path)
+            with winreg.CreateKey(key, "command") as command_key:
+                winreg.SetValueEx(command_key, "", 0, winreg.REG_SZ, delete_command)
 
 
 def silent_unlock(path):
@@ -271,23 +272,81 @@ def silent_unlock(path):
         print(f"Path not found: {path}")
         return 2
     try:
-        matches = parse_handle_output(run_handle(path), path)
-        terminated = 0
-        for match in matches:
-            try:
-                process = psutil.Process(match["pid"])
-                process.terminate()
-                process.wait(timeout=1)
-                terminated += 1
-            except (psutil.NoSuchProcess, psutil.TimeoutExpired):
-                terminated += 1
-            except (psutil.AccessDenied, PermissionError):
-                print(f"Access denied: {match['name']} ({match['pid']})")
-        print(f"Unlocked {terminated} process(es) for {path}")
-        return 0 if terminated else 1
+        terminated, failed = terminate_processes(get_lock_processes(path))
+        print(f"Closed {terminated} process(es); failed: {failed}; path: {path}")
+        return 0 if terminated and not failed else 1
     except Exception as exc:
         logger.exception("Silent unlock failed")
         print(f"Unlock failed: {exc}")
+        return 1
+
+
+class SHFILEOPSTRUCTW(ctypes.Structure):
+    _fields_ = [
+        ("hwnd", wintypes.HWND),
+        ("wFunc", wintypes.UINT),
+        ("pFrom", wintypes.LPCWSTR),
+        ("pTo", wintypes.LPCWSTR),
+        ("fFlags", wintypes.WORD),
+        ("fAnyOperationsAborted", wintypes.BOOL),
+        ("hNameMappings", wintypes.LPVOID),
+        ("lpszProgressTitle", wintypes.LPCWSTR),
+    ]
+
+
+def send_to_recycle_bin(path):
+    """Move a file or folder to the Windows Recycle Bin."""
+    operation = SHFILEOPSTRUCTW(
+        wFunc=3,
+        pFrom=f"{path}\0\0",
+        fFlags=0x0040 | 0x0010 | 0x0004 | 0x0400,
+    )
+    return ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation)) == 0
+
+
+def delete_path(path, permanent):
+    if permanent:
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
+        return True
+    return send_to_recycle_bin(path)
+
+
+def run_unlock_dialog(path):
+    app = QApplication.instance() or QApplication(sys.argv)
+    dialog = ProcessChoiceDialog(path)
+    result = dialog.exec()
+    if not QApplication.instance():
+        app.quit()
+    return 0 if result == QDialog.DialogCode.Accepted else 1
+
+
+def run_force_delete_dialog(path):
+    app = QApplication.instance() or QApplication(sys.argv)
+    choice = QMessageBox()
+    choice.setWindowTitle("Force Delete")
+    choice.setText(f"Delete this path?\n\n{path}")
+    choice.setInformativeText("Choose Recycle Bin to keep a way back, or Permanent Delete to remove it now.")
+    recycle = choice.addButton("Recycle Bin", QMessageBox.ButtonRole.AcceptRole)
+    permanent = choice.addButton("Permanent Delete", QMessageBox.ButtonRole.DestructiveRole)
+    choice.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+    choice.exec()
+    clicked = choice.clickedButton()
+    if clicked not in (recycle, permanent):
+        return 1
+
+    if get_lock_processes(path):
+        process_dialog = ProcessChoiceDialog(path)
+        if process_dialog.exec() != QDialog.DialogCode.Accepted:
+            return 1
+    try:
+        delete_path(path, clicked is permanent)
+        QMessageBox.information(None, "Delete complete", "The path was deleted.")
+        return 0
+    except Exception as exc:
+        QMessageBox.critical(None, "Delete failed", str(exc))
         return 1
 
 
@@ -322,38 +381,147 @@ def is_safe_to_kill(process_name, pid):
     return True
 
 def parse_handle_output(output, query):
-    """Parse handle.exe output. Validates input and provides debug info."""
+    """Parse Handle output into safe process records."""
     if not isinstance(output, str):
-        print("❌ Invalid input to parse_handle_output!")
-        print(f"Type received: {type(output)}")
-        print("Caller trace:")
-        traceback.print_stack(limit=5)
         raise ValueError("Expected raw string output from handle.exe, but got something else")
 
     matches = []
 
     for line in output.splitlines():
         if query.lower() in line.lower():
-            match = re.search(r"(.+?)\s+pid:\s+(\d+)\s+type:\s+\w+\s+(.*)", line)
+            match = re.search(r"^(.+?)\s+pid:\s*(\d+)\s+type:\s*\S+\s+(.*)$", line, re.IGNORECASE)
             if match:
                 process_name = match.group(1).strip()
                 pid = int(match.group(2))
                 path = match.group(3).strip()
 
-                if is_safe_to_kill(process_name, pid):
-                    matches.append({
-                        "name": process_name,
-                        "pid": pid,
-                        "path": path
-                    })
-                else:
-                    print(f"[❌] Skipped unsafe process: {process_name} (PID: {pid})")
+                matches.append({
+                    "name": process_name,
+                    "pid": pid,
+                    "path": path,
+                    "protected": not is_safe_to_kill(process_name, pid),
+                })
 
     return matches
 
-# ==============================
-# ICON BUTTON
-# ==============================
+
+def process_risk(process_name, pid):
+    """Return a simple warning level for a process the user may stop."""
+    name = process_name.lower()
+    try:
+        process = psutil.Process(pid)
+        username = (process.username() or "").lower()
+        path = (process.exe() or "").lower()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        username = ""
+        path = ""
+
+    if name in {"system", "idle", "svchost.exe", "csrss.exe", "wininit.exe", "winlogon.exe", "services.exe", "lsass.exe", "explorer.exe", "smss.exe"}:
+        return "PROTECTED - Windows process", 4
+    if name in {"code.exe", "devenv.exe", "winword.exe", "excel.exe", "notepad.exe"}:
+        return "HIGH - may lose unsaved work", 3
+    if "system32" in path or "windows" in path or "system" in username:
+        return "HIGH - Windows process", 3
+    if name in {"chrome.exe", "msedge.exe", "firefox.exe", "python.exe", "node.exe"}:
+        return "MEDIUM - active app", 2
+    return "LOW - review first", 1
+
+
+def get_lock_processes(path):
+    """Find lock owners and add warning data for the small action dialog."""
+    records = []
+    for match in parse_handle_output(run_handle(path), path):
+        warning, rank = process_risk(match["name"], match["pid"])
+        match["warning"] = warning
+        match["rank"] = rank
+        records.append(match)
+    return sorted(records, key=lambda item: (-item["rank"], item["name"].lower(), item["pid"]))
+
+
+def terminate_processes(processes):
+    """Stop selected processes and return success and failure counts."""
+    stopped = 0
+    failed = 0
+    for item in processes:
+        if item.get("protected"):
+            failed += 1
+            continue
+        try:
+            process = psutil.Process(item["pid"])
+            process.terminate()
+            try:
+                process.wait(timeout=1)
+            except psutil.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1)
+            stopped += 1
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            stopped += 1
+        except (psutil.AccessDenied, PermissionError, psutil.TimeoutExpired):
+            failed += 1
+        except Exception:
+            logger.exception("Could not stop PID %s", item.get("pid"))
+            failed += 1
+    return stopped, failed
+
+
+class ProcessChoiceDialog(QDialog):
+    def __init__(self, path, parent=None):
+        super().__init__(parent)
+        self.path = path
+        self.processes = get_lock_processes(path)
+        self.setWindowTitle("LockLift - Choose processes")
+        self.resize(900, 430)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"Processes using: {path}"))
+        self.table = QTableWidget(len(self.processes), 5)
+        self.table.setHorizontalHeaderLabels(["Close", "Process", "PID", "Risk", "Handle"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        for row, process in enumerate(self.processes):
+            check = QTableWidgetItem()
+            check.setCheckState(Qt.CheckState.Unchecked)
+            self.table.setItem(row, 0, check)
+            self.table.setItem(row, 1, QTableWidgetItem(process["name"]))
+            self.table.setItem(row, 2, QTableWidgetItem(str(process["pid"])))
+            self.table.setItem(row, 3, QTableWidgetItem(process["warning"]))
+            self.table.setItem(row, 4, QTableWidgetItem(process["path"]))
+            if process.get("protected"):
+                self.table.item(row, 0).setFlags(Qt.ItemFlag.ItemIsEnabled)
+        layout.addWidget(self.table)
+
+        note = QLabel("High risk apps may have unsaved work. Check each process before closing it.")
+        layout.addWidget(note)
+        buttons = QHBoxLayout()
+        select_all = QPushButton("Select all")
+        close_selected = QPushButton("Close selected")
+        cancel = QPushButton("Cancel")
+        select_all.clicked.connect(self.select_all)
+        close_selected.clicked.connect(self.close_selected)
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(select_all)
+        buttons.addWidget(close_selected)
+        buttons.addWidget(cancel)
+        layout.addLayout(buttons)
+        set_action_cursors(self)
+
+    def select_all(self):
+        for row in range(self.table.rowCount()):
+            if not self.processes[row].get("protected"):
+                self.table.item(row, 0).setCheckState(Qt.CheckState.Checked)
+
+    def close_selected(self):
+        selected = [
+            process for row, process in enumerate(self.processes)
+            if self.table.item(row, 0).checkState() == Qt.CheckState.Checked and not process.get("protected")
+        ]
+        if not selected:
+            QMessageBox.information(self, "No process selected", "Select at least one process.")
+            return
+        stopped, failed = terminate_processes(selected)
+        QMessageBox.information(self, "Unlock complete", f"Closed {stopped} process(es). Failed: {failed}.")
+        self.accept()
+
 class IconButton(QPushButton):
     def __init__(self, icon_path, text, color, parent=None):
         super().__init__(parent)
@@ -440,15 +608,6 @@ class IconButton(QPushButton):
             )
         )
 
-
-# ==============================
-# WORKER THREADS
-# ==============================
-import re
-import logging
-from PyQt6.QtCore import QThread, pyqtSignal
-
-logger = logging.getLogger(__name__)
 
 class FileLockDetector(QThread):
     locks_detected = pyqtSignal(list)
@@ -609,9 +768,6 @@ class FileMonitor(QThread):
         self.running = False
 
 
-# ==============================
-# SPLASH SCREEN - FIXED VERSION
-# ==============================
 class SplashScreen(QDialog):
     def __init__(self):
         super().__init__()
@@ -732,9 +888,6 @@ class SplashScreen(QDialog):
             self.accept()
 
 
-# ==============================
-# MAIN APPLICATION
-# ==============================
 class UnlockerApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -911,7 +1064,10 @@ class UnlockerApp(QMainWindow):
         QTimer.singleShot(0, self.prompt_explorer_integration)
 
     def prompt_explorer_integration(self):
-        if self.settings.get("explorer_integration") is not None:
+        if self.settings.get("explorer_integration") is True:
+            set_explorer_integration(True)
+            return
+        if self.settings.get("explorer_integration") is False:
             return
         answer = QMessageBox.question(
             self,
@@ -1975,9 +2131,6 @@ class UnlockerApp(QMainWindow):
             logger.error(f"[❌] Failed to schedule move/rename: {e}")
             return False
 
-    # ==============================
-    # FILE OPERATIONS
-    # ==============================
     def browse_file(self):
         logger.debug("Browsing for file")
         file_path, _ = QFileDialog.getOpenFileName(
@@ -2161,9 +2314,8 @@ class UnlockerApp(QMainWindow):
         """Save lock scan results to a persistent CSV file with detailed logging"""
         try:
             # File paths
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            report_path = os.path.join(base_dir, "locks_report.csv")
-            log_path = os.path.join(base_dir, "locks_report.log")
+            report_path = os.path.join(APP_DATA_DIR, "locks_report.csv")
+            log_path = os.path.join(APP_DATA_DIR, "locks_report.log")
 
             # Setup logger for file writing
             file_logger = logging.getLogger("lock_report")
@@ -2642,9 +2794,6 @@ class UnlockerApp(QMainWindow):
             self.show_status_message(error, "#e74c3c")
             logger.error(error)
 
-    # ==============================
-    # UI ENHANCEMENTS
-    # ==============================
     def show_status_message(self, message, color):
         if not self.ui_animations_enabled:
             self.status_bar.showMessage(message)
@@ -3121,19 +3270,45 @@ class UnlockerApp(QMainWindow):
             "YouTube: https://www.youtube.com/@The_studio725\n"
             "Email: studiocoding09@gmail.com")
 
-# APPLICATION ENTRY POINT
-# ==============================
 def main():
     logger.info("Application starting")
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print("LockLift commands:")
+        print('  --unlock "PATH"        Review and close lock owners')
+        print('  --force-delete "PATH" Ask how to delete a path')
+        print('  --silent "PATH"       Close all safe lock owners')
+        print("  --register-explorer   Add File Explorer actions")
+        print("  --unregister-explorer Remove File Explorer actions")
+        return
     if "--register-explorer" in sys.argv:
         set_explorer_integration(True)
         return
     if "--unregister-explorer" in sys.argv:
         set_explorer_integration(False)
         return
+    action = None
+    for name in ("--unlock", "--force-delete", "--silent"):
+        if name in sys.argv:
+            action = name
+            break
+    if action in ("--unlock", "--force-delete"):
+        index = sys.argv.index(action)
+        path = sys.argv[index + 1] if index + 1 < len(sys.argv) else ""
+        if not path or not os.path.exists(path):
+            print(f"Path not found: {path}")
+            return 2
+        if not is_admin() and "--elevated" not in sys.argv:
+            elevate_if_needed()
+            return
+        if action == "--unlock":
+            raise SystemExit(run_unlock_dialog(path))
+        raise SystemExit(run_force_delete_dialog(path))
     if "--silent" in sys.argv:
         index = sys.argv.index("--silent")
         path = sys.argv[index + 1] if index + 1 < len(sys.argv) else ""
+        if not path or not os.path.exists(path):
+            print(f"Path not found: {path}")
+            return 2
         if not is_admin() and "--elevated" not in sys.argv:
             elevate_if_needed()
             return
